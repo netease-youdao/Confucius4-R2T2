@@ -208,6 +208,22 @@ class R2T2ASRModel(Qwen3ASRModel):
             max_new_tokens=max_new_tokens,
         )
 
+    def _streaming_generate(self, prompt, audio, max_new_tokens=None):
+        """Generate text from prompt + audio, dispatching to the active backend."""
+        if self.backend == "vllm":
+            from vllm import SamplingParams
+            inp = {"prompt": prompt, "multi_modal_data": {"audio": [audio]}}
+            sp = SamplingParams(temperature=0.0, max_tokens=max_new_tokens, skip_special_tokens=True) if max_new_tokens else self.sampling_params
+            return self.model.generate([inp], sampling_params=sp, use_tqdm=False)[0].outputs[0].text
+        else:
+            inputs = self.processor(text=[prompt], audio=[audio], return_tensors="pt", padding=True)
+            inputs = inputs.to(self.model.device).to(self.model.dtype)
+            text_ids = self.model.generate(**inputs, max_new_tokens=max_new_tokens or self.max_new_tokens)
+            return self.processor.batch_decode(
+                text_ids.sequences[:, inputs["input_ids"].shape[1]:],
+                skip_special_tokens=True, clean_up_tokenization_spaces=False,
+            )[0]
+
     @torch.no_grad()
     def transcribe(
         self,
@@ -264,8 +280,6 @@ class R2T2ASRModel(Qwen3ASRModel):
                 - If chunk_size_sec <= 0.
                 - If forced language is invalid (same validation rules as transcribe()).
         """
-        if self.backend != "vllm":
-            raise ValueError("Streaming ASR is supported only for vLLM backend (backend='vllm').")
         if chunk_size_sec is None or float(chunk_size_sec) <= 0:
             raise ValueError(f"chunk_size_sec must be > 0, got: {chunk_size_sec}")
 
@@ -347,10 +361,6 @@ class R2T2ASRModel(Qwen3ASRModel):
             ValueError:
                 If backend is not "vllm" or state is invalid.
         """
-        if max_new_tokens is not None:
-            from vllm import SamplingParams
-        if self.backend != "vllm":
-            raise ValueError("streaming_transcribe() is supported only for vLLM backend (backend='vllm').")
         if state is None:
             raise ValueError("state must not be None. Call init_streaming_state() first.")
         if pcm16k is None:
@@ -414,18 +424,7 @@ class R2T2ASRModel(Qwen3ASRModel):
             
             prompt = state.prompt_raw + prefix
 
-            # vLLM input: single item
-            inp = {"prompt": prompt, "multi_modal_data": {"audio": [state.audio_accum]}}
-            if max_new_tokens is not None:
-                sampling_params = SamplingParams(
-                    temperature=0.0,
-                    max_tokens=max_new_tokens,
-                    skip_special_tokens=True,
-                )
-                outputs = self.model.generate([inp], sampling_params=sampling_params, use_tqdm=False)
-            else:
-                outputs = self.model.generate([inp], sampling_params=self.sampling_params, use_tqdm=False)
-            gen_text = outputs[0].outputs[0].text
+            gen_text = self._streaming_generate(prompt, state.audio_accum, max_new_tokens)
             gen_text = _normalize_punct_by_context(gen_text).replace('\ufffd', '')
             #print(f"prefix={prefix}")
             state._raw_decoded = (prefix + gen_text) if prefix is not None else gen_text
@@ -522,10 +521,6 @@ class R2T2ASRModel(Qwen3ASRModel):
             ValueError:
                 If backend is not "vllm" or state is invalid.
         """
-        if max_new_tokens is not None:
-            from vllm import SamplingParams
-        if self.backend != "vllm":
-            raise ValueError("finish_streaming_transcribe() is supported only for vLLM backend (backend='vllm').")
         if state is None:
             raise ValueError("state must not be None.")
 
@@ -553,18 +548,7 @@ class R2T2ASRModel(Qwen3ASRModel):
 
         prefix = prefix.split("|")[0]
         prompt = state.prompt_raw + prefix
-        inp = {"prompt": prompt, "multi_modal_data": {"audio": [state.audio_accum]}}
-
-        if max_new_tokens is not None:
-            sampling_params = SamplingParams(
-                temperature=0.0,
-                max_tokens=max_new_tokens,
-                skip_special_tokens=True,
-            )
-            outputs = self.model.generate([inp], sampling_params=sampling_params, use_tqdm=False)
-        else:
-            outputs = self.model.generate([inp], sampling_params=self.sampling_params, use_tqdm=False)
-        gen_text = outputs[0].outputs[0].text
+        gen_text = self._streaming_generate(prompt, state.audio_accum, max_new_tokens)
         gen_text = _normalize_punct_by_context(gen_text).replace('\ufffd', '')
 
         state._raw_decoded = (prefix + gen_text) if prefix is not None else gen_text
@@ -616,10 +600,6 @@ class R2T2ASRModel(Qwen3ASRModel):
             ValueError:
                 If backend is not "vllm", state is invalid, or pcm16k is None.
         """
-        if max_new_tokens is not None:
-            from vllm import SamplingParams
-        if self.backend != "vllm":
-            raise ValueError("streaming_transcribe() is supported only for vLLM backend (backend='vllm').")
         if state is None:
             raise ValueError("state must not be None. Call init_streaming_state() first.")
         if pcm16k is None:
@@ -657,16 +637,7 @@ class R2T2ASRModel(Qwen3ASRModel):
             discard_samples = 8 * SAMPLE_RATE
             if state.audio_accum.shape[0] > max_samples:
                 keep_samples = state.audio_accum.shape[0] - discard_samples
-                # Calculate the exact number of chunks to discard: the first chunk is 320 ms (5,120 samples), and subsequent chunks are 160 ms (2,560 samples)
-                normal_chunk_samples = 2560  # 160ms
-                if not state._first_chunk_discarded:
-                    # First discard: the first chunk is 320 ms
-                    first_chunk_samples = 5120  # 320ms
-                    discard_chunks = 1 + (discard_samples - first_chunk_samples) // normal_chunk_samples  # = 49
-                    state._first_chunk_discarded = True
-                else:
-                    # Subsequent discards: all chunks are 160 ms
-                    discard_chunks = discard_samples // normal_chunk_samples  # = 50
+                discard_chunks = discard_samples // state.chunk_size_samples
                 state.audio_accum = state.audio_accum[-keep_samples:]
                 state.chunk_text = state.chunk_text[discard_chunks:]
 
@@ -679,18 +650,7 @@ class R2T2ASRModel(Qwen3ASRModel):
 
             prompt = state.prompt_raw + prefix
 
-            # vLLM input: single item
-            inp = {"prompt": prompt, "multi_modal_data": {"audio": [state.audio_accum]}}
-            if max_new_tokens is not None:
-                sampling_params = SamplingParams(
-                    temperature=0.0,
-                    max_tokens=max_new_tokens,
-                    skip_special_tokens=True,
-                )
-                outputs = self.model.generate([inp], sampling_params=sampling_params, use_tqdm=False)
-            else:
-                outputs = self.model.generate([inp], sampling_params=self.sampling_params, use_tqdm=False)
-            gen_text = outputs[0].outputs[0].text
+            gen_text = self._streaming_generate(prompt, state.audio_accum, max_new_tokens)
             # gen_text = gen_text.replace("#","|")
             gen_text = _normalize_punct_by_context(gen_text).replace('\ufffd', '')
 
@@ -797,10 +757,6 @@ class R2T2ASRModel(Qwen3ASRModel):
             ValueError:
                 If backend is not "vllm" or state is invalid.
         """
-        if max_new_tokens is not None:
-            from vllm import SamplingParams
-        if self.backend != "vllm":
-            raise ValueError("finish_streaming_transcribe() is supported only for vLLM backend (backend='vllm').")
         if state is None:
             raise ValueError("state must not be None.")
 
@@ -823,16 +779,7 @@ class R2T2ASRModel(Qwen3ASRModel):
         discard_samples = 8 * SAMPLE_RATE
         if state.audio_accum.shape[0] > max_samples:
             keep_samples = state.audio_accum.shape[0] - discard_samples
-            # Calculate the exact number of chunks to discard: the first chunk is 320 ms (5,120 samples), and subsequent chunks are 160 ms (2,560 samples)
-            normal_chunk_samples = 2560  # 160ms
-            if not state._first_chunk_discarded:
-                # First discard: the first chunk is 320 ms
-                first_chunk_samples = 5120  # 320ms
-                discard_chunks = 1 + (discard_samples - first_chunk_samples) // normal_chunk_samples  # = 49
-                state._first_chunk_discarded = True
-            else:
-                # Subsequent discards: all chunks are 160 ms
-                discard_chunks = discard_samples // normal_chunk_samples  # = 50
+            discard_chunks = discard_samples // state.chunk_size_samples
             state.audio_accum = state.audio_accum[-keep_samples:]
             state.chunk_text = state.chunk_text[discard_chunks:]
 
@@ -845,18 +792,7 @@ class R2T2ASRModel(Qwen3ASRModel):
         prefix = prefix.split("|")[0]    
         prompt = state.prompt_raw + prefix
 
-        inp = {"prompt": prompt, "multi_modal_data": {"audio": [state.audio_accum]}}
-
-        if max_new_tokens is not None:
-            sampling_params = SamplingParams(
-                temperature=0.0,
-                max_tokens=max_new_tokens,
-                skip_special_tokens=True,
-            )
-            outputs = self.model.generate([inp], sampling_params=sampling_params, use_tqdm=False)
-        else:
-            outputs = self.model.generate([inp], sampling_params=self.sampling_params, use_tqdm=False)
-        gen_text = outputs[0].outputs[0].text
+        gen_text = self._streaming_generate(prompt, state.audio_accum, max_new_tokens)
    
         gen_text = _normalize_punct_by_context(gen_text).replace('\ufffd', '')
         print(f"finish gen_text={gen_text}")
