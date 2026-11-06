@@ -18,6 +18,10 @@ venv/
 env/
 .env
 
+# Local model and compiler caches
+.hf-cache/
+.torchinductor-cache/
+
 # Editors / IDE
 .vscode/
 .idea/
@@ -34,6 +38,7 @@ nohup.log
 run_example.log
 outputs/
 runs/
+leaderboard/
 
 # Jupyter / notebooks
 .ipynb_checkpoints/
@@ -46,4 +51,9 @@ htmlcov/
 # Downloaded model weights (see README: FireRedVAD Stream-VAD goes here)
 checkpoints/
 
-
+# Prebuilt llama.cpp artifacts shipped with the r2t2_llama package. These are
+# release products, not build leftovers, so they override the `*.so` rule above.
+# See r2t2_llama/README.md for the pinned llama.cpp version.
+!r2t2_llama/native/*.so
+!r2t2_llama/bin/*.so
+!r2t2_llama/bin/*.so.*

@@ -1,6 +1,6 @@
 # r2t2_llama — llama.cpp decoding for Confucius4-R2T2
 
-This folder adds llama.cpp decode support to Confucius4-R2T2. 
+This folder adds llama.cpp decoding support to Confucius4-R2T2.
 
 Point `GGUF_DIR` at a directory holding both the projector (`mmproj*`) and the language model (`*.gguf`). Both filenames are auto-discovered.
 
@@ -14,7 +14,7 @@ Point `GGUF_DIR` at a directory holding both the projector (`mmproj*`) and the l
 
 The hybrid route exists because the two encoders are not equally robust on
 quiet audio onsets. It keeps the PyTorch encoder and swaps only the decoder,
-which isolates decode cost without changing encode quality.
+which isolates decoding cost without changing encoding quality.
 
 ## Usage
 
@@ -45,7 +45,13 @@ Other flags: `--chunk_size_ms` (default 160), `--lookahead_ms` (160),
 `--unfixed_token_num` (1), `--context` (hotword / context hint).
 Set `DEBUG_PRINT=1` for per-chunk decode traces.
 
-The demo reuses `example.py` from the repository root, so it exercises the same chunk schedule as the vLLM demo. 
+The demo reuses `example.py` from the repository root, so it exercises the same chunk schedule as the vLLM demo.
+
+`--unfixed_token_num` sets the provisional-token budget `U`: use `1` for
+quality priority or `0` for latency priority. Only the finalized prefix
+should be consumed as stable text. The paper's results have not been
+established for these GGUF routes; cache reuse and suffix verification
+remain future work.
 
 ### Python
 
@@ -57,7 +63,12 @@ asr = R2T2LlamaASRModel.LlamaHybrid(
     gguf_dir="/path/to/gguf",
 )
 
-state = asr.init_streaming_state(language="Chinese", chunk_size_sec=0.16)
+state = asr.init_streaming_state(
+    language="Chinese",
+    unfixed_chunk_num=0,
+    unfixed_token_num=1,
+    chunk_size_sec=0.16,
+)
 for chunk in audio_chunks:                        # float32, 16 kHz, mono
     text, fixed_text = asr.streaming_transcribe(chunk, state, max_new_tokens=4)
 final_text = asr.finish_streaming_transcribe(state, max_new_tokens=4)
@@ -65,8 +76,8 @@ final_text = asr.finish_streaming_transcribe(state, max_new_tokens=4)
 
 ## Prebuilt native artifacts
 
-llama.cpp source is not committed to this repository. Only build products
-are shipped, pinned to:
+The llama.cpp source is not committed to this repository. Only build products
+are shipped, pinned to the following build configuration:
 
 | | |
 |---|---|
@@ -85,14 +96,14 @@ The extension is built for CPython 3.12. Other Python versions need a rebuild.
 
 ## Rebuilding the native extension
 
-You only need to change the pinned llama.cpp version, target a different Python ABI, or build for a non-CUDA platform.
+You only need to rebuild if you change the pinned llama.cpp version, target a different Python ABI, or build for a non-CUDA platform.
 
 ```bash
 # 1. fetch the pinned llama.cpp
 git clone https://github.com/ggml-org/llama.cpp third_party/llama.cpp
 git -C third_party/llama.cpp checkout ad6c66839af3c5646fba8c6c2e2087a1e4e38948
 
-# 2. configure (CUDA on; drop -DGGML_CUDA for a CPU-only build)
+# 2. configure (use -DGGML_CUDA=OFF for a CPU-only build)
 cmake -S r2t2_llama -B build \
     -DLLAMA_CPP_DIR="$PWD/third_party/llama.cpp" \
     -DGGML_CUDA=ON \
@@ -112,7 +123,7 @@ Verify with `objdump -x <so> | grep RUNPATH`.
 
 ### Environment variables read by the extension
 
-All are diagnostic and default to off:
+All are diagnostic and default to off.
 
 | variable | effect |
 |---|---|
