@@ -527,7 +527,7 @@ Scan the QR code below to join our WeChat group:
 
 ### Discord Server
 
-[Join our Discord server](https://discord.gg/GfhaWkCyb)
+[Join our Discord server]([https://discord.gg/T6YadShxKq)
 
 ### Business contact
 For high-concurrency, production-grade, domestic, or private deployments, as well as business inquiries and partnership opportunities, please contact us through the channels below.
